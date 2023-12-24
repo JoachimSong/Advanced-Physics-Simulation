@@ -1,0 +1,257 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Init
+#pragma kernel Step
+
+#define THREAD_X 8
+#define THREAD_Y 8
+
+//顶点位置
+RWStructuredBuffer<float3> positions;
+//顶点速度
+RWStructuredBuffer<float3> velocities;
+
+//x表示横向顶点数量,y表示纵向顶点数量,z = x * y
+uint3 size;
+//弹性系数.xyz分别对应结构弹簧、剪力弹簧、弯曲弹簧
+float3 springKs;
+//弹簧原长.xyz分别对应结构弹簧、剪力弹簧、弯曲弹簧
+uniform float3 restLengths;
+//单个顶点的质量
+uniform float mass;
+//单次迭代时间间隔
+float dt;
+
+bool implicitEuler;
+
+int maxIterations;
+
+float convergenceThreshold;
+
+//球体信息
+float sphereRadius;
+float3 spherePos;
+float3 clothPos;
+
+//根据线程ID，获取对应顶点的索引
+static uint getIndex(uint2 id) {
+    return id.y * size.x + id.x;
+}
+//获取指定索引的顶点位置
+static float3 getPosition(uint index) {
+    return positions[index].xyz;
+}
+//获取指定线程ID的顶点位置
+static float3 getPosition(uint2 id) {
+    return positions[getIndex(id)].xyz;
+}
+//获取指定索引的顶点速度
+static float3 getVelocity(uint index) {
+    return velocities[index];
+}
+//设置速度
+static void setVelocity(uint index, float3 vel) {
+    velocities[index] = vel;
+}
+//设置位置
+static void setPosition(uint index, float3 pos) {
+    positions[index] = pos;
+}
+//判断索引是否可用
+static bool isValidateId(uint2 id) {
+    return id.x >= 0 && id.x < size.x && id.y >= 0 && id.y < size.y;
+}
+
+
+static float3 calculateF(uint2 id, float3 position, float3 velocity) {
+    uint index = getIndex(id);
+    float3 f = float3(0, 0, 0);
+    
+    //TODO:计算重力
+    f += mass * float3(0, -9.8f, 0);
+
+    //TODO:计算弹性力
+    float factor1 = springKs.x;//结构力系数
+    float factor2 = springKs.y;//剪力系数
+    float factor3 = springKs.z;//弯曲力系数
+    float len1 = restLengths.x;//结构力长度
+    float len2 = restLengths.y;//剪力长度
+    float len3 = restLengths.z;//弯曲力长度
+    float3 curPos = getPosition(index);//当前节点位置
+    float3 UPos = float3(0, 0, 0);//上方顶点位置
+    float3 DPos = float3(0, 0, 0);//下方顶点位置
+    float3 LPos = float3(0, 0, 0);//左方顶点位置
+    float3 RPos = float3(0, 0, 0);//右方顶点位置
+    float3 ULPos = float3(0, 0, 0);//左上方顶点位置
+    float3 URPos = float3(0, 0, 0);//右上方顶点位置
+    float3 DLPos = float3(0, 0, 0);//左下方顶点位置
+    float3 DRPos = float3(0, 0, 0);//右下方顶点位置
+    float3 UPos2 = float3(0, 0, 0);//上方顶点位置2
+    float3 DPos2 = float3(0, 0, 0);//下方顶点位置2
+    float3 LPos2 = float3(0, 0, 0);//左方顶点位置2
+    float3 RPos2 = float3(0, 0, 0);//右方顶点位置2
+
+    //结构力
+    if (id.y != 0) {
+        //有来自上方结构力
+        UPos = getPosition(index - size.x);
+        float3 dir = curPos - UPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor1 * (len - len1);
+    }
+    if (id.y != size.y - 1) {
+        //有来自下方结构力
+        DPos = getPosition(index + size.x);
+        float3 dir = curPos - DPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor1 * (len - len1);
+    }
+    if (id.x != 0) {
+        //有来自左方结构力
+        LPos = getPosition(index - 1);
+        float3 dir = curPos - LPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor1 * (len - len1);
+    }
+    if (id.x != size.x - 1) {
+        //有来自右方结构力
+        RPos = getPosition(index + 1);
+        float3 dir = curPos - RPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor1 * (len - len1);
+    }
+    //剪力
+    if (id.y != 0 && id.x != 0) {
+        //有左上方向的剪力
+        ULPos = getPosition(index - size.x - 1);
+        float3 dir = curPos - ULPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor2 * (len - len2);
+    }
+    if (id.y != 0 && id.x != size.x - 1) {
+        //有右上方向的剪力
+        URPos = getPosition(index - size.x + 1);
+        float3 dir = curPos - URPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor2 * (len - len2);
+    }
+    if (id.x != 0 && id.y != size.y - 1) {
+        //有左下方向的剪力
+        DLPos = getPosition(index + size.x - 1);
+        float3 dir = curPos - DLPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor2 * (len - len2);
+    }
+    if (id.x != size.x - 1 && id.y != size.y - 1) {
+        //有右下方向的剪力
+        DRPos = getPosition(index + size.x + 1);
+        float3 dir = curPos - DRPos;
+        float len = length(dir);
+        f += -normalize(dir) * factor2 * (len - len2);
+    }
+    //弯曲力
+    if (id.y > 1) {
+        UPos2 = getPosition(index - size.x * 2);
+        float3 dir = curPos - UPos2;
+        float len = length(dir);
+        f += -normalize(dir) * factor3 * (len - len3);
+    }
+    if (id.y < size.y - 2) {
+        DPos2 = getPosition(index + size.x * 2);
+        float3 dir = curPos - DPos2;
+        float len = length(dir);
+        f += -normalize(dir) * factor3 * (len - len3);
+    }
+    if (id.x >1) {
+        LPos2 = getPosition(index - 2);
+        float3 dir = curPos - LPos2;
+        float len = length(dir);
+        f += -normalize(dir) * factor3 * (len - len3);
+    }
+    if (id.x < size.x - 2) {
+        RPos2 = getPosition(index + 2);
+        float3 dir = curPos - RPos2;
+        float len = length(dir);
+        f += -normalize(dir) * factor3 * (len - len3);
+    }
+    //TODO:计算阻尼力
+    f += -0.05 * getVelocity(index);
+
+    return f;
+}
+
+
+[numthreads(THREAD_X, THREAD_Y, 1)]
+void Init(uint3 id : SV_DispatchThreadID)
+{
+    //初始化顶点位置和速度
+    uint index = getIndex(id.xy);
+    positions[index] = float3(id.x * restLengths.x, 0, id.y * restLengths.x);
+    velocities[index] = float3(0, 0, 0);
+}
+
+[numthreads(THREAD_X, THREAD_Y, 1)]
+void Step(uint3 id : SV_DispatchThreadID)
+{
+    //固定两个顶点
+    if (id.y == 0 && (id.x == 0 || id.x == size.x - 1)) {
+        return;
+    }
+
+    uint index = getIndex(id.xy);
+
+    if (!implicitEuler) {
+        //TODO:计算受力和加速度
+        float3 force = calculateF(id.xy, getPosition(index), getVelocity(index));
+        float3 a = force / mass;
+        //TODO:更新速度
+        float3 newVelocity = getVelocity(index) + a * dt;
+        setVelocity(index, newVelocity);
+
+        //TODO:更新位置
+        float3 newPosition = getPosition(index) + newVelocity * dt;
+        setPosition(index, newPosition);
+    }
+    else {
+        float3 oldVelocity = getVelocity(index);
+        float3 newVelocity = oldVelocity;
+        float3 newPosition = getPosition(index);
+        float3 oldAcceleration = calculateF(id.xy, newPosition, oldVelocity) / mass;
+        float3 newAcceleration = oldAcceleration;
+
+        //迭代计算未知的加速度值
+        int i = 0;
+        while (i < maxIterations) {
+            newVelocity = oldVelocity + newAcceleration * dt;
+            newPosition = getPosition(index) + newVelocity * dt;
+            newAcceleration = calculateF(id.xy, newPosition, newVelocity) / mass;
+
+            if (length(newAcceleration - oldAcceleration) < convergenceThreshold) {
+                break;
+            }
+
+            oldAcceleration = newAcceleration;
+            i++;
+        }
+
+        //更新速度和位置
+        setVelocity(index, newVelocity);
+        setPosition(index, newPosition);
+    }
+
+    float collisionRadius = sphereRadius * 1.01;
+    float3 pos = getPosition(index);
+
+    //球体相对位置
+    float3 relativeSpherePos = spherePos - clothPos;
+
+    float3 dirFromSphere = pos - relativeSpherePos;
+    float lenFromSphere = length(dirFromSphere);
+    if (lenFromSphere < collisionRadius) {
+        float3 normal = dirFromSphere / lenFromSphere;
+        float3 correctedPos = relativeSpherePos + normal * collisionRadius;
+        setVelocity(index, float3(0,0,0));
+        setPosition(index, correctedPos);
+    }
+
+}
+

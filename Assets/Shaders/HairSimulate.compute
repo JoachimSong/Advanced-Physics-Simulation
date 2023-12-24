@@ -1,0 +1,116 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Init
+#pragma kernel Step
+
+#define THREAD_X 8
+#define THREAD_Y 1
+
+//上一帧的顶点位置
+RWStructuredBuffer<float3> prePositions;
+//当前帧的顶点位置
+RWStructuredBuffer<float3> positions;
+
+//使用松弛法时迭代的次数
+uint iterations;
+//阻尼系数
+float damping;
+//重量
+float gravity;
+//发丝数量
+uint hairCount;
+//每根头发节点数
+uint nodeCount;
+//每根头发节点的间距
+float nodeDistance;
+//head属性
+float headRadius;
+float3 headPos;
+//dt*dt
+float sqrDt;
+
+bool implicitEuler;
+
+
+static uint getIndex(uint2 id) {
+    return id.x;
+}
+
+static bool isValidateId(uint index) {
+    return index >= 0 && index < hairCount;
+}
+
+[numthreads(THREAD_X, THREAD_Y, 1)]
+void Init(uint3 id : SV_DispatchThreadID)
+{
+    uint index = getIndex(id.xy);
+
+    //初始化每根头发上所有控制顶点的位置
+    float a = 500.f * frac(sin(index));
+    float b = 500.f * frac(cos(index));
+    for (uint i = 0; i < nodeCount; i++)
+    {
+        positions[index * nodeCount + i].y = headPos.y + (headRadius + i * nodeDistance) * sin(0.5f + a / 360.0f);
+        positions[index * nodeCount + i].x = headPos.x + (headRadius + i * nodeDistance) * cos(0.5f + a / 360.0f) * sin(2.0f * b / 360.0f - 1.0f + 3.14f);
+        positions[index * nodeCount + i].z = headPos.z + (headRadius + i * nodeDistance) * cos(0.5f + a / 360.0f) * cos(2.0f * b / 360.0f - 1.0f + 3.14f);
+        prePositions[index * nodeCount + i] = positions[index * nodeCount + i];
+    }
+}
+
+[numthreads(THREAD_X, THREAD_Y, 1)]
+void Step(uint3 id : SV_DispatchThreadID)
+{
+    uint index = getIndex(id.xy);
+
+    for (uint i = 1; i < nodeCount; i++)
+    {
+        uint curIndex = nodeCount * index + i;
+
+        //外力造成的加速度
+        float3 a = float3(0, gravity, 0);
+
+        //TODO:计算verlet积分，同时更新位置/上一帧的位置
+        //新位置 x(t+T)=x(t)+d*(x(t)-x(t-T))+a(t)*T^2 
+        if (!implicitEuler) {
+            float3 newPos = positions[curIndex] + (positions[curIndex] - prePositions[curIndex]) * damping + a * sqrDt;
+            prePositions[curIndex] = positions[curIndex];
+            positions[curIndex] = newPos;
+        }
+        else {
+            float T = sqrt(sqrDt);
+            float3 curVelocity = (positions[curIndex] - prePositions[curIndex]) / T;
+            float3 newVelocity = curVelocity + a * T;
+            newVelocity *= pow(damping, T);
+            float3 newPos = positions[curIndex] + newVelocity * T;
+            prePositions[curIndex] = positions[curIndex];
+            positions[curIndex] = newPos;
+        }
+        
+
+    }
+    for (uint iter = 0; iter < iterations; iter++) {
+        for (uint i = 1; i < nodeCount; i++)
+        {
+            uint curIndex = nodeCount * index + i;
+            uint fatherIndex = nodeCount * index + i - 1;
+
+            //TODO: 更新每个节点与父节点的距离、处理顶点与球体的碰撞
+            //处理head的穿透时，为了避免头发紧贴头皮，可以让head的碰撞体略大于头本身，如collisionRadius=headRadius*1.5
+            //碰撞约束
+            float collisionRadius = headRadius * 1.5;
+            float3 pos = positions[curIndex];
+            float3 dirFromHead = pos - headPos;
+            float lenFromHead = length(dirFromHead);
+            if (lenFromHead < collisionRadius) {
+                float3 normal = dirFromHead / lenFromHead;
+                float3 correctedPos = headPos + normal * collisionRadius;
+                positions[curIndex] = correctedPos;
+            }
+
+            //弹簧约束
+            float3 dir = positions[curIndex] - positions[fatherIndex];
+            float len = length(dir);
+            float3 offset = (len - nodeDistance) / (len * 2) * dir;
+            positions[curIndex] -= offset;
+        }
+    }
+}

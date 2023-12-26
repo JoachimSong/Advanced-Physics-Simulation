@@ -49,7 +49,7 @@ Project Objectives:
 
 ## Installation
 
-GitHub Repository: [Advanced Physics Simulation](https://github.com/JoachimSong/Advanced-Physics-Simulation)
+Download and unzip the **Advanced Physics_Build.zip**, then open the **Advanced Physics.exe** to launch the program.
 
 ## Controls
 
